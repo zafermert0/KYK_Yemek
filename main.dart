@@ -5,7 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-const version = '0.2.2';
+const version = '0.2.3';
 const platform = MethodChannel('com.yurtmenu/native');
 const sourcePage = 'https://kepce.org';
 String kepceUrl(String city, String date) => Uri.https('kepce.org','/api/v1/menus',{'city':city,'date':date}).toString();
@@ -17,7 +17,7 @@ String normalized(String s) => s.replaceAll('İ','i').replaceAll('I','ı').toLow
 Future<void> openExternal(String url) async { await platform.invokeMethod('open', url); }
 Future<dynamic> getJson(String url) async {
   final client=HttpClient()..connectionTimeout=const Duration(seconds:10);
-  try { final request=await client.getUrl(Uri.parse(url)); request.headers.set('User-Agent','KYK-Yemek/0.2.2'); request.headers.set('Accept','application/json'); request.followRedirects=false; final response=await request.close().timeout(const Duration(seconds:15)); if(response.statusCode!=200)throw HttpException('HTTP ${response.statusCode}'); final bytes=<int>[]; await for(final chunk in response.timeout(const Duration(seconds:15))){bytes.addAll(chunk);if(bytes.length>3000000)throw const FormatException('Veri çok büyük');} return jsonDecode(utf8.decode(bytes)); } finally {client.close(force:true);}
+  try { final request=await client.getUrl(Uri.parse(url)); request.headers.set('User-Agent','KYK-Yemek/0.2.3'); request.headers.set('Accept','application/json'); request.followRedirects=false; final response=await request.close().timeout(const Duration(seconds:15)); if(response.statusCode!=200)throw HttpException('HTTP ${response.statusCode}'); final bytes=<int>[]; await for(final chunk in response.timeout(const Duration(seconds:15))){bytes.addAll(chunk);if(bytes.length>3000000)throw const FormatException('Veri çok büyük');} return jsonDecode(utf8.decode(bytes)); } finally {client.close(force:true);}
 }
 Map<String,dynamic> validateMenus(dynamic obj){
  if(obj is! Map || obj.isEmpty)throw const FormatException(); final result=<String,dynamic>{};
@@ -250,5 +250,5 @@ class _MenuHomeState extends State<MenuHome> with WidgetsBindingObserver {
     SwitchListTile(title:const Text('Favori yemek bildirimi'),subtitle:const Text('Kayıtlı menüde eşleşme varsa öğün saatinde'),value:favoriteAlert,onChanged:(v){setState(()=>favoriteAlert=v);saveAlerts();}),ListTile(leading:const Icon(Icons.favorite_outline),title:const Text('Favori ekle'),onTap:editFavorites),for(final f in favorites.toList()..sort())ListTile(title:Text(f),trailing:IconButton(tooltip:'Kaldır',onPressed:()=>toggleFavorite(f),icon:const Icon(Icons.close))),const Divider(),
     SwitchListTile(title:const Text('Açılışta sürüm kontrolü'),value:updateAlert,onChanged:(v){setState(()=>updateAlert=v);widget.prefs.setBool('updateAlert',v);}),ListTile(title:const Text('Güncellemeyi kontrol et'),onTap:()=>checkUpdate()),ListTile(title:const Text('GitHub sürümleri'),onTap:()=>openExternal(releasesPage)),const Divider(),
     const ListTile(leading:Icon(Icons.widgets_outlined),title:Text('Ana ekran widget’ı'),subtitle:Text('Android ana ekranına uzun bas → Widget’lar → YurtMenü. Kayıtlı menüyü gösterir.')),
-    ListTile(leading:const Icon(Icons.location_on_outlined),title:const Text('Şehir'),subtitle:const Text('Konum izni gerekmez'),trailing:DropdownButton<String>(value:city,items:cityNames.entries.map((e)=>DropdownMenuItem(value:e.key,child:Text(e.value))).toList(),onChanged:(v){if(v!=null&&v!=city)changeCity(v);})),const ListTile(leading:Icon(Icons.verified_user_outlined),title:Text('Gizlilik'),subtitle:Text('Reklam, üyelik, analitik yok. Favoriler cihazda saklanır.')),const ListTile(leading:Icon(Icons.info_outline),title:Text('Sürüm 0.2.2'),subtitle:Text('Bağımsız uygulama · Menü yurda göre değişebilir. Bildirim saatleri Android tarafından geciktirilebilir.'))]);
+    ListTile(leading:const Icon(Icons.location_on_outlined),title:const Text('Şehir'),subtitle:const Text('Konum izni gerekmez'),trailing:DropdownButton<String>(value:city,items:cityNames.entries.map((e)=>DropdownMenuItem(value:e.key,child:Text(e.value))).toList(),onChanged:(v){if(v!=null&&v!=city)changeCity(v);})),const ListTile(leading:Icon(Icons.verified_user_outlined),title:Text('Gizlilik'),subtitle:Text('Reklam, üyelik, analitik yok. Favoriler cihazda saklanır.')),const ListTile(leading:Icon(Icons.code),title:Text('Geliştirici'),subtitle:Text('zafermert0')),const ListTile(leading:Icon(Icons.info_outline),title:Text('Sürüm $version'),subtitle:Text('Bağımsız uygulama · Menü yurda göre değişebilir. Bildirim saatleri Android tarafından geciktirilebilir.'))]);
 }
