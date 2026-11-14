@@ -1,0 +1,42 @@
+name: Android APK
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Generate Flutter project
+        run: |
+          flutter create --no-pub --platforms=android,ios --org com.yurtmenu --project-name yurtmenu "$RUNNER_TEMP/yurtmenu"
+          cp main.dart "$RUNNER_TEMP/yurtmenu/lib/main.dart"
+          unzip -q android_support.zip -d "$RUNNER_TEMP/kyk-support"
+          python3 -m pip install pillow
+          python3 "$RUNNER_TEMP/kyk-support/support/install.py" "$RUNNER_TEMP/yurtmenu"
+          cd "$RUNNER_TEMP/yurtmenu"
+          flutter pub add shared_preferences
+          sed -i 's/^version: .*/version: 0.2.2+4/' pubspec.yaml
+          rm -f test/widget_test.dart
+          dart format lib/main.dart
+          flutter analyze --no-fatal-infos --no-fatal-warnings
+          flutter build apk --debug
+      - uses: actions/upload-artifact@v4
+        with:
+          name: YurtMenu-Android-v0.2.2
+          path: ${{ runner.temp }}/yurtmenu/build/app/outputs/flutter-apk/app-debug.apk
+          if-no-files-found: error
