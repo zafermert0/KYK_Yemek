@@ -5,7 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-const version = '0.2.3';
+const version = '0.2.4';
 const platform = MethodChannel('com.yurtmenu/native');
 const sourcePage = 'https://kepce.org';
 String kepceUrl(String city, String date) => Uri.https('kepce.org','/api/v1/menus',{'city':city,'date':date}).toString();
@@ -17,7 +17,7 @@ String normalized(String s) => s.replaceAll('İ','i').replaceAll('I','ı').toLow
 Future<void> openExternal(String url) async { await platform.invokeMethod('open', url); }
 Future<dynamic> getJson(String url) async {
   final client=HttpClient()..connectionTimeout=const Duration(seconds:10);
-  try { final request=await client.getUrl(Uri.parse(url)); request.headers.set('User-Agent','KYK-Yemek/0.2.3'); request.headers.set('Accept','application/json'); request.followRedirects=false; final response=await request.close().timeout(const Duration(seconds:15)); if(response.statusCode!=200)throw HttpException('HTTP ${response.statusCode}'); final bytes=<int>[]; await for(final chunk in response.timeout(const Duration(seconds:15))){bytes.addAll(chunk);if(bytes.length>3000000)throw const FormatException('Veri çok büyük');} return jsonDecode(utf8.decode(bytes)); } finally {client.close(force:true);}
+  try { final request=await client.getUrl(Uri.parse(url)); request.headers.set('User-Agent','KYK-Yemek/$version'); request.headers.set('Accept','application/json'); request.followRedirects=false; final response=await request.close().timeout(const Duration(seconds:15)); if(response.statusCode!=200)throw HttpException('HTTP ${response.statusCode}'); final bytes=<int>[]; await for(final chunk in response.timeout(const Duration(seconds:15))){bytes.addAll(chunk);if(bytes.length>3000000)throw const FormatException('Veri çok büyük');} return jsonDecode(utf8.decode(bytes)); } finally {client.close(force:true);}
 }
 Map<String,dynamic> validateMenus(dynamic obj){
  if(obj is! Map || obj.isEmpty)throw const FormatException(); final result=<String,dynamic>{};
@@ -154,15 +154,30 @@ class _MenuHomeState extends State<MenuHome> with WidgetsBindingObserver {
   void toast(String text){if(mounted)ScaffoldMessenger.of(context).showSnackBar(SnackBar(content:Text(text)));}
   Future<void> refresh({bool manual=false}) async {
     if(!cityChosen)return;
-    if(refreshing){dateFetch?.cancel();dateFetch=Timer(const Duration(seconds:2),(){if(mounted)refresh();});return;}
+    if(refreshing){dateFetch?.cancel();final pendingDay=keyOf(selected),pendingCity=city;dateFetch=Timer(const Duration(seconds:2),(){if(mounted&&city==pendingCity&&keyOf(selected)==pendingDay)refresh(manual:manual);});return;}
     if(endpoint.isEmpty){if(manual)toast('Canlı kaynak kapalı.');return;}
     final slug=city, token=generation, day=keyOf(selected), today=keyOf(ankaraToday());
     final p=widget.prefs, now=DateTime.now().millisecondsSinceEpoch;
     final attemptKey=cityKey('kepceAttempt'), successKey=cityKey('kepceSuccess_$day');
     if(!manual&&remoteDates.contains(day)&&now-(p.getInt(successKey)??0)<21600000)return;
+    // Only fetch the date being viewed. Do not crawl or prefetch a month.
     final elapsed=now-(p.getInt('kepceGlobalAttempt')??0);
-    if(elapsed<30000){if(manual)toast('Yenileme için kısa süre bekle.');dateFetch?.cancel();dateFetch=Timer(Duration(milliseconds:30000-elapsed),(){if(mounted)refresh();});return;}
-    setState(()=>refreshing=true);
+    final blockedUntil=p.getInt('kepceBackoffUntil')??0;
+    if(now<blockedUntil){
+      setState((){statusDate=day;status='Kaynak istek sınırı nedeniyle geçici olarak bekleniyor.';});
+      if(manual)toast('Bir süre sonra tekrar dene.');
+      return;
+    }
+    // A short interval and selection debounce avoid bursts while browsing.
+    if(elapsed<10000){
+      dateFetch?.cancel();
+      final delay=Duration(milliseconds:10000-elapsed);
+      setState((){statusDate=day;status='Seçili günün menüsü birkaç saniye içinde sorgulanacak.';});
+      dateFetch=Timer(delay,(){if(mounted&&generation==token&&keyOf(selected)==day)refresh(manual:manual);});
+      return;
+    }
+    dateFetch?.cancel();
+    setState((){refreshing=true;statusDate=day;status='Seçili günün menüsü alınıyor…';});
     try{
       await p.setInt('kepceGlobalAttempt',now);await p.setInt(attemptKey,now);
       final incoming=parseKepceToday(await getJson(kepceUrl(slug,day==today?'today':day)),day,slug);
@@ -172,18 +187,28 @@ class _MenuHomeState extends State<MenuHome> with WidgetsBindingObserver {
       if(prior!=null){try{cached.addAll(validateMenus(jsonDecode(prior)));}catch(_){}}
       final fresh=incoming[day] as Map;final old=cached[day];
       if(old is Map){for(final meal in ['breakfast','dinner']){if((fresh[meal] as List).isEmpty&&old[meal] is List)fresh[meal]=old[meal];}}
+      // Preserve up to 31 individually viewed dates per city, most recently accessed first.
+      // No automatic bulk collection, no server, no new API endpoint assumptions.
+      cached.remove(day);
       cached.addAll(incoming);
-      // Small recent on-device cache only, no background bulk collection.
-      while(cached.length>7){cached.remove(cached.keys.firstWhere((k)=>k!=day));}
+      while(cached.length>31){cached.remove(cached.keys.first);}
       if(!await p.setString(cacheKey,jsonEncode(cached)))throw StateError('Kayıt başarısız');
       await p.setInt(successKey,DateTime.now().millisecondsSinceEpoch);
       if(!mounted||generation!=token)return;
-      setState((){loadCity();final t=ankaraNow();status='Son güncelleme: ${timeText(t.hour*60+t.minute)}';});
+      setState((){loadCity();final t=ankaraNow();statusDate=day;status='Son güncelleme: ${timeText(t.hour*60+t.minute)}';});
       await syncNative();if(manual)toast('Menü güncellendi.');
-    }catch(_){if(mounted&&generation==token){setState((){statusDate=day;status='Bu tarih için güncelleme alınamadı · kayıtlar korunuyor.';});if(manual)toast('Menü güncellenemedi.');}}
+    }catch(e){
+      final limited=e is HttpException&&e.message=='HTTP 429';
+      if(limited){await p.setInt('kepceBackoffUntil',DateTime.now().millisecondsSinceEpoch+300000);dateFetch?.cancel();}
+      if(mounted&&generation==token){
+        setState((){statusDate=day;status=limited?'Kaynak istek sınırı · daha sonra tekrar dene.':e is FormatException?'Bu tarih için onaylı menü alınamadı · kayıtlar korunuyor.':'Bağlantı veya kaynak hatası · kayıtlar korunuyor.';});
+        if(manual)toast('Menü güncellenemedi.');
+      }
+    }
     finally{if(mounted&&generation==token)setState(()=>refreshing=false);}
   }
   Future<void> toggleKepce(bool enabled) async {
+    if(!enabled)dateFetch?.cancel();
     setState(()=>endpoint=enabled?'enabled':'');await widget.prefs.setBool('kepceEnabled',enabled);if(enabled)await refresh(manual:true);
   }
 
@@ -233,16 +258,16 @@ class _MenuHomeState extends State<MenuHome> with WidgetsBindingObserver {
   String updateLabel(){final ms=widget.prefs.getInt(cityKey('kepceSuccess_${keyOf(selected)}'));if(ms==null)return 'Kepçe · Kayıtlı menü';final t=DateTime.fromMillisecondsSinceEpoch(ms,isUtc:true).add(const Duration(hours:3));return 'Son güncelleme: ${keyOf(t)} · ${timeText(t.hour*60+t.minute)}';}
   Widget mealSelector(ColorScheme cs)=>Container(padding:const EdgeInsets.all(4),decoration:BoxDecoration(color:cs.surface,borderRadius:BorderRadius.circular(40),border:Border.all(color:cs.outline)),child:Row(children:[for(final m in [true,false])Expanded(child:Semantics(selected:breakfast==m,button:true,child:InkWell(borderRadius:BorderRadius.circular(40),onTap:()=>setState(()=>breakfast=m),child:AnimatedContainer(duration:const Duration(milliseconds:200),padding:const EdgeInsets.symmetric(vertical:12),decoration:BoxDecoration(color:breakfast==m?cs.primary:cs.surface,borderRadius:BorderRadius.circular(40)),child:Row(mainAxisAlignment:MainAxisAlignment.center,children:[Icon(m?Icons.coffee_outlined:Icons.dinner_dining,size:19,color:breakfast==m?cs.onPrimary:cs.onSurface),const SizedBox(width:8),Flexible(child:Text(m?'Kahvaltı':'Akşam Yemeği',style:TextStyle(color:breakfast==m?cs.onPrimary:cs.onSurface,fontWeight:FontWeight.w600)))])))))]));
   Widget swipeCard(Widget child)=>GestureDetector(onHorizontalDragStart:(_)=>drag=0,onHorizontalDragUpdate:(d)=>drag+=d.delta.dx,onHorizontalDragEnd:(_){if(drag.abs()>45)choose(dayAdd(selected,drag<0?1:-1));drag=0;},child:child);
-  Widget mealCard(ColorScheme cs,bool morning){final items=meals(morning);return Container(padding:const EdgeInsets.all(20),decoration:BoxDecoration(color:cs.surface,borderRadius:BorderRadius.circular(27),border:Border.all(color:cs.outline.withAlpha(130))),child:Column(crossAxisAlignment:CrossAxisAlignment.stretch,children:[Row(children:[Icon(Icons.calendar_month_outlined,color:cs.primary,size:30),const SizedBox(width:12),Expanded(child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[Text(dateLabel(selected),style:const TextStyle(fontSize:17,fontWeight:FontWeight.w700)),const SizedBox(height:4),Text(morning?'$cityName KYK · Kahvaltı':'$cityName KYK · Akşam yemeği',style:TextStyle(color:cs.onSurfaceVariant))]))]),const SizedBox(height:12),Divider(color:cs.outline),if(items.isEmpty)Padding(padding:const EdgeInsets.symmetric(vertical:40),child:Column(children:[Icon(Icons.event_busy_outlined,color:cs.primary,size:40),const SizedBox(height:12),const Text('Bu öğün için menü bulunamadı.',textAlign:TextAlign.center),TextButton(onPressed:importMenus,child:const Text('Menü ekle'))])) else for(var i=0;i<items.length;i++)... [groupRow(cs,items[i],morning),if(i<items.length-1)Divider(height:10,indent:54,color:cs.outline.withAlpha(120))]]));}
+  Widget mealCard(ColorScheme cs,bool morning){final items=meals(morning);return Container(padding:const EdgeInsets.all(20),decoration:BoxDecoration(color:cs.surface,borderRadius:BorderRadius.circular(27),border:Border.all(color:cs.outline.withAlpha(130))),child:Column(crossAxisAlignment:CrossAxisAlignment.stretch,children:[Row(children:[Icon(Icons.calendar_month_outlined,color:cs.primary,size:30),const SizedBox(width:12),Expanded(child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[Text(dateLabel(selected),style:const TextStyle(fontSize:17,fontWeight:FontWeight.w700)),const SizedBox(height:4),Text(morning?'$cityName KYK · Kahvaltı':'$cityName KYK · Akşam yemeği',style:TextStyle(color:cs.onSurfaceVariant))]))]),const SizedBox(height:12),Divider(color:cs.outline),if(items.isEmpty)Padding(padding:const EdgeInsets.symmetric(vertical:40),child:Column(children:[Icon(Icons.event_busy_outlined,color:cs.primary,size:40),const SizedBox(height:12),Text(refreshing?'Menü alınıyor…':statusDate==keyOf(selected)&&status.isNotEmpty?status:'Bu öğün henüz cihazda kayıtlı değil.',textAlign:TextAlign.center),if(endpoint.isNotEmpty)TextButton(onPressed:()=>refresh(manual:true),child:const Text('Bu günü yenile')),TextButton(onPressed:()=>openExternal(Uri.https('kepce.org','/$city',{'gun':keyOf(selected)}).toString()),child:const Text('Kaynakta bu güne bak')),TextButton(onPressed:importMenus,child:const Text('Menü ekle'))])) else for(var i=0;i<items.length;i++)... [groupRow(cs,items[i],morning),if(i<items.length-1)Divider(height:10,indent:54,color:cs.outline.withAlpha(120))]]));}
   String category(String dish,bool morning){final s=normalized(dish);if(s.contains('çorba'))return 'Çorba';if(s.contains('pilav')||s.contains('makarna')||s.contains('bulgur'))return 'Pilav / Makarna';if(s.contains('supangle')||s.contains('tatlı')||s.contains('sütlaç')||s.contains('puding'))return 'Tatlı';if(s.contains('zeytin'))return 'Zeytin';if(s.contains('peynir')||s.contains('labne'))return 'Peynir';if(s=='su'||s.contains('ayran')||s.contains('meyve suyu')||s=='çay')return 'İçecek';if(s=='ekmek')return 'Ekmek';return morning?'Kahvaltılık':'Ana yemek';}
   Widget groupRow(ColorScheme cs,String raw,bool morning){final foods=raw.split(altSeparator);final label=category(foods.first,morning);return Padding(padding:const EdgeInsets.symmetric(vertical:2),child:Row(crossAxisAlignment:CrossAxisAlignment.start,children:[Container(width:40,height:40,alignment:Alignment.center,decoration:BoxDecoration(color:cs.secondaryContainer,shape:BoxShape.circle),child:Icon(dishIcon(foods.first,morning),color:cs.primary,size:22)),const SizedBox(width:12),Expanded(child:Column(crossAxisAlignment:CrossAxisAlignment.stretch,children:[Text(label,style:TextStyle(color:cs.primary,fontSize:12,fontWeight:FontWeight.w600)),for(var i=0;i<foods.length;i++)...[if(i>0)Row(children:[Expanded(child:Divider(color:cs.outline.withAlpha(110))),Padding(padding:const EdgeInsets.symmetric(horizontal:10),child:Text('veya',style:TextStyle(color:cs.primary,fontSize:12,fontStyle:FontStyle.italic))),Expanded(child:Divider(color:cs.outline.withAlpha(110)))]),Row(children:[Expanded(child:Text(foods[i],style:const TextStyle(fontSize:16,fontWeight:FontWeight.w600))),IconButton(tooltip:'Favori',onPressed:()=>toggleFavorite(foods[i]),icon:Icon(favorites.contains(normalized(foods[i]))?Icons.favorite:Icons.favorite_border,size:19,color:cs.primary))])]]))]));}
   IconData dishIcon(String dish,bool morning){switch(foodIcon(dish,morning)){case '🍮':return Icons.cake_outlined;case '🥣':return Icons.soup_kitchen_outlined;case '🍳':return Icons.egg_outlined;case '🥐':case '🥖':return Icons.bakery_dining_outlined;case '🧀':return Icons.breakfast_dining_outlined;case '🍚':case '🍝':return Icons.rice_bowl_outlined;case '🍗':case '🍖':return Icons.dinner_dining;case '💧':return Icons.water_drop_outlined;case '🥛':return Icons.local_drink_outlined;case '☕':return Icons.coffee_outlined;case '🫒':case '🥗':return Icons.eco_outlined;default:return Icons.restaurant_outlined;}}
   String foodIcon(String item,bool morning){final s=normalized(item);bool has(List<String> words)=>words.any(s.contains);if(has(['supangle','puding','sütlaç','muhallebi','tatlı','kazandibi','revani','baklava','helva']))return '🍮';if(has(['çorba']))return '🥣';if(has(['yumurta','omlet','menemen']))return '🍳';if(has(['börek','milföy','poğaça','kruvasan']))return '🥐';if(has(['peynir','labne']))return '🧀';if(has(['pilav','bulgur']))return '🍚';if(has(['makarna','erişte']))return '🍝';if(has(['tavuk']))return '🍗';if(has(['köfte','kebap','et sote']))return '🍖';if(has(['kızartma','kroket']))return '🍟';if(has(['meyve suyu','ayran','süt']))return '🥛';if(RegExp(r'^(\d+\s*(ml|l)\s*)?su$').hasMatch(s))return '💧';if(has(['ekmek','simit']))return '🥖';if(has(['zeytin']))return '🫒';if(has(['çay']))return '☕';if(has(['salata','domates','salatalık']))return '🥗';if(has(['meyve','elma','armut']))return '🍎';return morning?'🍽️':'🥘';}
-  Widget calendar(ColorScheme cs){final first=DateTime(calendarMonth.year,calendarMonth.month);final days=DateTime(first.year,first.month+1,0).day;final offset=first.weekday-1;return Container(padding:const EdgeInsets.all(16),decoration:BoxDecoration(color:cs.surface,borderRadius:BorderRadius.circular(24)),child:Column(children:[Row(mainAxisAlignment:MainAxisAlignment.spaceBetween,children:[IconButton(tooltip:'Önceki ay',onPressed:()=>setState(()=>calendarMonth=DateTime(first.year,first.month-1)),icon:const Icon(Icons.chevron_left)),Text('${months[first.month-1]} ${first.year}',style:const TextStyle(fontWeight:FontWeight.bold,fontSize:18)),IconButton(tooltip:'Sonraki ay',onPressed:()=>setState(()=>calendarMonth=DateTime(first.year,first.month+1)),icon:const Icon(Icons.chevron_right))]),Row(children:[for(final d in shortDays)Expanded(child:Center(child:Text(d,style:TextStyle(color:cs.onSurfaceVariant))))]),const SizedBox(height:12),GridView.builder(shrinkWrap:true,physics:const NeverScrollableScrollPhysics(),itemCount:((offset+days+6)~/7)*7,gridDelegate:const SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount:7,mainAxisSpacing:4,crossAxisSpacing:4,childAspectRatio:0.92),itemBuilder:(_,i){final n=i-offset+1;if(n<1||n>days)return const SizedBox();final d=DateTime(first.year,first.month,n);final active=keyOf(d)==keyOf(selected);return InkWell(borderRadius:BorderRadius.circular(12),onTap:()=>choose(d,goMenu:true),child:Container(decoration:BoxDecoration(color:active?cs.primary:cs.secondaryContainer,borderRadius:BorderRadius.circular(12)),child:Column(mainAxisAlignment:MainAxisAlignment.center,children:[Text('$n',style:TextStyle(color:active?cs.onPrimary:cs.onSurface,fontWeight:FontWeight.bold)),if(data.containsKey(keyOf(d)))Icon(Icons.circle,size:6,color:active?cs.onPrimary:cs.primary)])));}),const SizedBox(height:12),const Text('Nokta: kayıtlı menü') ]));}
+  Widget calendar(ColorScheme cs){final first=DateTime(calendarMonth.year,calendarMonth.month);final days=DateTime(first.year,first.month+1,0).day;final offset=first.weekday-1;return Container(padding:const EdgeInsets.all(16),decoration:BoxDecoration(color:cs.surface,borderRadius:BorderRadius.circular(24)),child:Column(children:[Row(mainAxisAlignment:MainAxisAlignment.spaceBetween,children:[IconButton(tooltip:'Önceki ay',onPressed:()=>setState(()=>calendarMonth=DateTime(first.year,first.month-1)),icon:const Icon(Icons.chevron_left)),Text('${months[first.month-1]} ${first.year}',style:const TextStyle(fontWeight:FontWeight.bold,fontSize:18)),IconButton(tooltip:'Sonraki ay',onPressed:()=>setState(()=>calendarMonth=DateTime(first.year,first.month+1)),icon:const Icon(Icons.chevron_right))]),Row(children:[for(final d in shortDays)Expanded(child:Center(child:Text(d,style:TextStyle(color:cs.onSurfaceVariant))))]),const SizedBox(height:12),GridView.builder(shrinkWrap:true,physics:const NeverScrollableScrollPhysics(),itemCount:((offset+days+6)~/7)*7,gridDelegate:const SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount:7,mainAxisSpacing:4,crossAxisSpacing:4,childAspectRatio:0.92),itemBuilder:(_,i){final n=i-offset+1;if(n<1||n>days)return const SizedBox();final d=DateTime(first.year,first.month,n);final active=keyOf(d)==keyOf(selected);return InkWell(borderRadius:BorderRadius.circular(12),onTap:()=>choose(d,goMenu:true),child:Container(decoration:BoxDecoration(color:active?cs.primary:cs.secondaryContainer,borderRadius:BorderRadius.circular(12)),child:Column(mainAxisAlignment:MainAxisAlignment.center,children:[Text('$n',style:TextStyle(color:active?cs.onPrimary:cs.onSurface,fontWeight:FontWeight.bold)),if(data.containsKey(keyOf(d)))Icon(Icons.circle,size:6,color:active?cs.onPrimary:cs.primary)])));}),const SizedBox(height:12),Text('Bu ay: ${data.keys.where((k)=>k.startsWith(keyOf(first).substring(0,7))).length}/$days gün cihazda kayıtlı. Nokta: kayıtlı menü. Diğer günleri seçerek sorgula.',textAlign:TextAlign.center) ]));}
   Widget settings(ColorScheme cs)=>Column(crossAxisAlignment:CrossAxisAlignment.stretch,children:[
     ListTile(title:const Text('Görünüm'),subtitle:const Text('Mevcut siyah ve sıcak bej palet'),trailing:DropdownButton<String>(value:widget.mode,items:const [DropdownMenuItem(value:'dark',child:Text('Koyu')),DropdownMenuItem(value:'light',child:Text('Açık')),DropdownMenuItem(value:'amoled',child:Text('AMOLED')),DropdownMenuItem(value:'system',child:Text('Sistem'))],onChanged:(v){if(v!=null)widget.onTheme(v); })),const Divider(),
     ListTile(leading:Icon(Icons.refresh,color:cs.primary),title:const Text('Menüyü yenile'),subtitle:Text(endpoint.isEmpty?'Canlı bağlantı kapalı':status.isEmpty?'Kepçe · Günlük menü':status),onTap:()=>refresh(manual:true)),
-    SwitchListTile(title:const Text('Kepçe canlı menü'),subtitle:Text('$cityName · seçili gün'),value:endpoint.isNotEmpty,onChanged:toggleKepce),
+    SwitchListTile(title:const Text('Kepçe canlı menü'),subtitle:Text('$cityName · seçili gün · 31 güne kadar yerel kayıt'),value:endpoint.isNotEmpty,onChanged:toggleKepce),
     ListTile(leading:Icon(Icons.open_in_new,color:cs.primary),title:const Text('Kaynak: kepce.org'),onTap:()=>openExternal(sourcePage)),
     ListTile(leading:Icon(Icons.file_download_outlined,color:cs.primary),title:const Text('Menü verisi ekle'),subtitle:const Text('JSON ile çevrimdışı güncelle'),onTap:importMenus),const Divider(),
     SwitchListTile(title:const Text('Kahvaltı bildirimi'),subtitle:Text(timeText(morningMinutes)),value:morningAlert,onChanged:(v){setState(()=>morningAlert=v);saveAlerts();}),ListTile(title:const Text('Kahvaltı saati'),trailing:Text(timeText(morningMinutes)),onTap:()=>pickTime(true)),
