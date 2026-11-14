@@ -154,6 +154,7 @@ class _MenuHomeState extends State<MenuHome> with WidgetsBindingObserver {
     if(enabled)await refresh(manual:true);
   }
 
+  int compareVersions(String a,String b){List<int> parts(String x)=>x.replaceFirst(RegExp(r'^v'),'').split('.').map((e)=>int.tryParse(e)??0).toList();final aa=parts(a),bb=parts(b);for(var i=0;i<3;i++){final n=(i<aa.length?aa[i]:0).compareTo(i<bb.length?bb[i]:0);if(n!=0)return n;}return 0;}
   Future<void> checkUpdate({bool silent=false}) async {try{final obj=await getJson('https://api.github.com/repos/zafermert0/KYK_Yemek/releases/latest');final tag=obj['tag_name'];if(tag is! String)throw const FormatException();if(!mounted)return;if(compareVersions(tag,version)>0){setState(()=>updateTag=tag);if(!silent)toast('Yeni sürüm: $tag');}else if(!silent){toast('En güncel sürüm kullanılıyor.');}}catch(_){if(!silent)toast('Yayımlanmış sürüm bulunamadı veya bağlantı başarısız.');}}
   Future<void> saveAlerts() async {final p=widget.prefs;await p.setBool('morningAlert',morningAlert);await p.setBool('eveningAlert',eveningAlert);await p.setBool('favoriteAlert',favoriteAlert);await p.setInt('morningMinutes',morningMinutes);await p.setInt('eveningMinutes',eveningMinutes);if(morningAlert||eveningAlert||favoriteAlert){try{final granted=await platform.invokeMethod<bool>('permission');if(granted!=true)toast('Bildirim izni gerekli. Android ayarlarından açabilirsin.');}catch(_){}}await syncNative();}
   String timeText(int n)=>'${(n~/60).toString().padLeft(2,'0')}:${(n%60).toString().padLeft(2,'0')}';
